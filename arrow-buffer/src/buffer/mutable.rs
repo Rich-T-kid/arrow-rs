@@ -284,9 +284,15 @@ impl MutableBuffer {
         }
 
         let bytes_to_repeat = size_of_val(slice_to_repeat);
+        let repeated_bytes = repeat_count
+            .checked_mul(bytes_to_repeat)
+            .expect("repeated slice byte length overflow");
+        self.len
+            .checked_add(repeated_bytes)
+            .expect("mutable buffer length overflow");
 
         // Ensure capacity
-        self.reserve(repeat_count * bytes_to_repeat);
+        self.reserve(repeated_bytes);
 
         // Save the length before we do all the copies to know where to start from
         let length_before = self.len;
@@ -450,7 +456,13 @@ impl MutableBuffer {
 
     /// Clear all existing data from this buffer.
     pub fn clear(&mut self) {
-        self.len = 0
+        self.len = 0;
+        #[cfg(feature = "pool")]
+        {
+            if let Some(reservation) = self.reservation.lock().unwrap().as_mut() {
+                reservation.resize(self.len);
+            }
+        }
     }
 
     /// Returns the data stored in this buffer as a slice.
@@ -1371,7 +1383,7 @@ mod tests {
             assert_eq!(pool.used(), 40);
 
             // Truncate to zero
-            buffer.truncate(0);
+            buffer.clear();
             assert_eq!(buffer.len(), 0);
             assert_eq!(pool.used(), 0);
         }
@@ -1466,6 +1478,21 @@ mod tests {
 
         // Zero repeats
         test_repeat_count(0, &[1i32, 2, 3]);
+    }
+
+    #[test]
+    #[should_panic(expected = "repeated slice byte length overflow")]
+    fn test_repeat_slice_count_multiply_overflow() {
+        let mut buffer = MutableBuffer::new(0);
+        buffer.repeat_slice_n_times(&[0_u64], usize::MAX / mem::size_of::<u64>() + 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "mutable buffer length overflow")]
+    fn test_repeat_slice_count_len_overflow() {
+        let mut buffer = MutableBuffer::new(0);
+        buffer.push(0_u8);
+        buffer.repeat_slice_n_times(&[0_u8], usize::MAX);
     }
 
     #[test]
