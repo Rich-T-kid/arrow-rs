@@ -63,8 +63,9 @@ pub fn encode<R: RunEndIndexType>(
     // Iterate over each run
     for (physical_idx, run_end) in run_ends.enumerate() {
         let run_end = run_end.as_usize();
-
+        //let row_data = rows.row(physical_idx).data;
         // Process all elements in this run
+        //let cache: [&[u8]; 1] = [rows.row(physical_idx).data];
         while logical_idx < run_end && offset_idx < offsets.len() {
             let offset = &mut offsets[offset_idx];
             let out = &mut data[*offset..];
