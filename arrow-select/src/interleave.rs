@@ -1544,4 +1544,22 @@ mod tests {
             &[3]
         );
     }
+
+    #[test]
+    fn test_interleave_run_end_encoded_merges_identical_runs() {
+        // TODO: repoducer for interleave
+        let mut builder = PrimitiveRunBuilder::<Int32Type, Int32Type>::new();
+        builder.extend([0, 0, 0, 1, 1, 0, 0, 1, 1, 1].into_iter().map(Some));
+        let a = builder.finish();
+
+        let mut builder = PrimitiveRunBuilder::<Int32Type, Int32Type>::new();
+        builder.extend([2, 2, 1, 1, 1, 0, 1, 0, 0, 0].into_iter().map(Some));
+        let b = builder.finish();
+
+        println!("a: {a:#?}");
+        println!("b: {b:#?}");
+        let result = interleave(&[&a, &b], &[(0, 3), (0, 4), (1, 2), (1, 3), (1, 4)]).unwrap();
+        println!("result: {result:#?}");
+        assert!(matches!(result.data_type(), DataType::RunEndEncoded(_, _)));
+    }
 }
