@@ -30,6 +30,25 @@ use crate::{
     types::{Int16Type, Int32Type, Int64Type, RunEndIndexType},
 };
 
+/// Recursively applies a function to the values of a RunEndEncoded array, preserving the run structure.
+///
+/// # Example
+///
+/// ```ignore
+/// let result = ree_recurse!(array, Int32Type, my_function)?;
+/// ```
+///
+/// This macro is useful for implementing functions that should work on the logical values
+/// of a REE array while preserving the run-end encoding structure.
+#[macro_export]
+macro_rules! ree_recurse {
+    ($array:expr, $run_type:ty, $func:expr) => {{
+        let ree = $array.as_run_opt::<$run_type>().unwrap();
+        let inner_values = $func(ree.values().as_ref())?;
+        Ok(std::sync::Arc::new(ree.with_values(inner_values)))
+    }};
+}
+
 /// An array of [run-end encoded values].
 ///
 /// This encoding is variation on [run-length encoding (RLE)] and is good for representing
@@ -198,6 +217,24 @@ impl<R: RunEndIndexType> RunArray<R> {
     /// values here and must be handled separately.
     pub fn values(&self) -> &ArrayRef {
         &self.values
+    }
+
+    /// Returns a new [`RunArray`] with the same `run_ends` and the supplied `values`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `values.len()` does not equal the existing run count.
+    pub fn with_values(&self, values: ArrayRef) -> Self {
+        assert_eq!(values.len(), self.values.len());
+        let data_type = DataType::RunEndEncoded(
+            Arc::new(Field::new("run_ends", R::DATA_TYPE, false)),
+            Arc::new(Field::new("values", values.data_type().clone(), true)),
+        );
+        Self {
+            data_type,
+            run_ends: self.run_ends.clone(),
+            values,
+        }
     }
 
     /// Similar to [`values`] but accounts for logical slicing, returning only the values
