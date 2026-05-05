@@ -17,7 +17,7 @@
 
 //! Defines kernel for length of string arrays and binary arrays
 
-use arrow_array::ree_recurse;
+use arrow_array::ree_map;
 use arrow_array::*;
 use arrow_array::{cast::AsArray, types::*};
 use arrow_buffer::{ArrowNativeType, NullBuffer, OffsetBuffer};
@@ -118,9 +118,9 @@ pub fn length(array: &dyn Array) -> Result<ArrayRef, ArrowError> {
             )?))
         }
         DataType::RunEndEncoded(k, _) => match k.data_type() {
-            DataType::Int16 => ree_recurse!(array, Int16Type, length),
-            DataType::Int32 => ree_recurse!(array, Int32Type, length),
-            DataType::Int64 => ree_recurse!(array, Int64Type, length),
+            DataType::Int16 => ree_map!(array, Int16Type, length),
+            DataType::Int32 => ree_map!(array, Int32Type, length),
+            DataType::Int64 => ree_map!(array, Int64Type, length),
             _ => Err(ArrowError::InvalidArgumentError(format!(
                 "Invalid run-end type: {:?}",
                 k.data_type()
@@ -191,9 +191,9 @@ pub fn bit_length(array: &dyn Array) -> Result<ArrayRef, ArrowError> {
             )?))
         }
         DataType::RunEndEncoded(k, _) => match k.data_type() {
-            DataType::Int16 => ree_recurse!(array, Int16Type, bit_length),
-            DataType::Int32 => ree_recurse!(array, Int32Type, bit_length),
-            DataType::Int64 => ree_recurse!(array, Int64Type, bit_length),
+            DataType::Int16 => ree_map!(array, Int16Type, bit_length),
+            DataType::Int32 => ree_map!(array, Int32Type, bit_length),
+            DataType::Int64 => ree_map!(array, Int64Type, bit_length),
             _ => Err(ArrowError::InvalidArgumentError(format!(
                 "Invalid run-end type: {:?}",
                 k.data_type()
