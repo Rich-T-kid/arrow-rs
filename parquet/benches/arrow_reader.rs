@@ -2672,6 +2672,7 @@ fn bench_plain_string_to_dict(c: &mut Criterion) {
                         .build()
                         .unwrap();
                 let mut count = 0usize;
+
                 for batch in reader {
                     count += batch.unwrap().num_rows();
                 }
