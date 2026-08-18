@@ -607,18 +607,38 @@ impl BooleanArray {
             return self;
         };
 
-        let mut_buffer_result = self.values.try_into_builder();
-        let mut builder = match mut_buffer_result {
-            Ok(mut mutable_buffer) => {
-                mutable_buffer.truncate(end);
-                mutable_buffer
+        let bit_offset = self.values.offset();
+        let inner_buf = self.values.into_inner();
+
+        // unique ownership : zero bytes directly,
+        if bit_offset == 0 {
+            match inner_buf.into_mutable() {
+                Ok(mut mutable_buffer) => {
+                    let raw_bytes = mutable_buffer.as_slice_mut();
+                    let byte_idx = end / 8;
+                    let bits_to_keep = end % 8;
+                    if bits_to_keep == 0 {
+                        raw_bytes[byte_idx..].fill(0);
+                    } else {
+                        raw_bytes[byte_idx] &= (1_u8 << bits_to_keep) - 1;
+                        raw_bytes[byte_idx + 1..].fill(0);
+                    }
+                    let boolean_buf = BooleanBuffer::new(mutable_buffer.into(), 0, len);
+                    return BooleanArray::new(boolean_buf, self.nulls);
+                }
+                Err(buf) => {
+                    // Shared buffer
+                    let mut builder = BooleanBufferBuilder::new(len);
+                    builder.append_buffer(&BooleanBuffer::new(buf, 0, end));
+                    builder.append_n(len - end, false);
+                    return BooleanArray::new(builder.finish(), self.nulls);
+                }
             }
-            Err(buf) => {
-                let mut builder = BooleanBufferBuilder::new(len);
-                builder.append_buffer(&buf.slice(0, end));
-                builder
-            }
-        };
+        }
+
+        // Fallback: copy via builder.
+        let mut builder = BooleanBufferBuilder::new(len);
+        builder.append_buffer(&BooleanBuffer::new(inner_buf, bit_offset, end));
         builder.append_n(len - end, false);
         BooleanArray::new(builder.finish(), self.nulls)
     }
