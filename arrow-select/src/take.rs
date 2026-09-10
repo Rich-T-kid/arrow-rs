@@ -1215,6 +1215,9 @@ fn take_fixed_size_binary<IndexType: ArrowPrimitiveType, const CHECKED: bool>(
     let value_nulls = take_nulls::<_, CHECKED>(values.nulls(), indices);
     let final_nulls = NullBuffer::union(value_nulls.as_ref(), indices.nulls());
 
+    if size == 0 && final_nulls.is_none() {
+        return FixedSizeBinaryArray::try_new_with_len(size, result_buffer, None, indices.len());
+    }
     return FixedSizeBinaryArray::try_new(size, result_buffer, final_nulls);
 
     /// Implementation of the take kernel for fixed size binary arrays.
@@ -2872,6 +2875,15 @@ mod tests {
             result.nulls().unwrap().iter().collect::<Vec<_>>(),
             vec![true, false, false, true]
         );
+    }
+
+    #[test]
+    fn test_take_zero_width_fixed_size_binary() {
+        let array =
+            FixedSizeBinaryArray::try_new_with_len(0, Buffer::default(), None, 3).unwrap();
+        let indices = UInt32Array::from(vec![2u32, 0]);
+        let result = take(&array, &indices, None).unwrap();
+        assert_eq!(result.len(), 2);
     }
 
     #[test]
