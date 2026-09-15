@@ -943,18 +943,16 @@ impl From<Vec<u8>> for BitReader {
     }
 }
 
-/// Parallel bit extract: for each set bit in `mask`, extract the
-/// corresponding bit from `value` and pack them contiguously into the low
-/// bits of the return value.
-///
-/// Equivalent to the x86 BMI2 `PEXT` instruction. When compiled with the
-/// `bmi2` target feature enabled (for example `-C target-cpu=x86-64-v3`)
-/// this lowers to the hardware `pext` instruction; otherwise it falls back
-/// to a portable scalar loop.
-///
-/// Replace with `value.compress(mask)` when `uint_gather_scatter_bits`
-/// is stabilised: <https://github.com/rust-lang/rust/issues/149069>
-#[cfg_attr(all(not(feature = "arrow"), not(test)), expect(dead_code))]
+// When arrow-buffer is available, reuse its `compress` implementation so
+// there is a single canonical definition in the codebase.
+#[cfg(feature = "arrow")]
+pub(crate) use arrow_buffer::bit_util::compress;
+
+/// For each set bit in `mask`, extract the corresponding bit from `value`
+/// and pack them into the low bits of the result (equivalent to x86 PEXT).
+/// Uses the hardware instruction when `bmi2` is available; otherwise falls
+/// back to a portable scalar loop.
+#[cfg(not(feature = "arrow"))]
 #[inline]
 pub(crate) fn compress(value: u64, mask: u64) -> u64 {
     #[cfg(all(target_arch = "x86_64", target_feature = "bmi2"))]
