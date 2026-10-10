@@ -8998,6 +8998,24 @@ mod tests {
     }
 
     #[test]
+    fn test_cast_dict_to_dict_key_width_only_reuses_values() {
+        let values = Arc::new(StringArray::from(vec!["foo", "bar"])) as ArrayRef;
+        let dict = DictionaryArray::<Int8Type>::new(
+            Int8Array::from(vec![Some(0), None, Some(1), Some(0)]),
+            values.clone(),
+        );
+
+        let result = cast(&dict, &Dictionary(Box::new(Int32), Box::new(Utf8))).unwrap();
+        let result = result.as_dictionary::<Int32Type>();
+
+        assert_eq!(
+            result.keys(),
+            &Int32Array::from(vec![Some(0), None, Some(1), Some(0)])
+        );
+        assert!(Arc::ptr_eq(&values, result.values()));
+    }
+
+    #[test]
     fn test_cast_nested_dictionary_to_dictionary_reuses_values() {
         let inner = DictionaryArray::<Int32Type>::new(
             Int32Array::from(vec![Some(0), None, Some(1)]),
