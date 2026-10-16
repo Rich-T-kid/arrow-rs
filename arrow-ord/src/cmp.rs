@@ -578,6 +578,31 @@ fn expand_from_runs(info: &ReeInfo, buffer: BooleanBuffer) -> BooleanBuffer {
 }
 
 fn take_bits(v: &dyn AnyDictionaryArray, buffer: BooleanBuffer) -> BooleanBuffer {
+    let true_count = buffer.count_set_bits();
+    let single_key = match true_count {
+        1 => buffer.set_indices().next().map(|key| (key, false)),
+        n if n + 1 == buffer.len() => buffer
+            .iter()
+            .position(|value| !value)
+            .map(|key| (key, true)),
+        _ => None,
+    };
+
+    if let Some((key, negate)) = single_key {
+        let keys = v.keys();
+        return downcast_primitive_array!(
+            keys => {
+                let values = keys.values();
+                collect_bool(values.len(), negate, |i| {
+                    // SAFETY: i is bounded by values.len(). Dictionary key validity is
+                    // handled by the comparison's logical null mask.
+                    unsafe { values.get_unchecked(i).as_usize() == key }
+                })
+            }
+            _ => unreachable!()
+        );
+    }
+
     let array = take(&BooleanArray::new(buffer, None), v.keys(), None).unwrap();
     array.as_boolean().values().clone()
 }
@@ -1195,6 +1220,33 @@ mod tests {
         let col = DictionaryArray::try_new(keys, Arc::new(values)).unwrap();
 
         neq(&col.slice(0, col.len() - 1), &col.slice(1, col.len() - 1)).unwrap();
+    }
+
+    #[test]
+    fn test_dictionary_scalar_single_key_expansion() {
+        let values = StringArray::from(vec!["", "a", "b"]);
+        let keys = Int32Array::from(vec![Some(0), Some(1), None, Some(2), Some(0)]);
+        let dictionary = DictionaryArray::new(keys, Arc::new(values));
+        let scalar = Scalar::new(StringArray::from(vec![""]));
+
+        let expected =
+            BooleanArray::from(vec![Some(true), Some(false), None, Some(false), Some(true)]);
+        assert_eq!(eq(&dictionary, &scalar).unwrap(), expected);
+
+        let expected =
+            BooleanArray::from(vec![Some(false), Some(true), None, Some(true), Some(false)]);
+        assert_eq!(neq(&dictionary, &scalar).unwrap(), expected);
+    }
+
+    #[test]
+    fn test_dictionary_scalar_multiple_matching_keys() {
+        let values = StringArray::from(vec!["", "", "b"]);
+        let keys = Int32Array::from(vec![0, 1, 2, 0]);
+        let dictionary = DictionaryArray::new(keys, Arc::new(values));
+        let scalar = Scalar::new(StringArray::from(vec![""]));
+
+        let expected = BooleanArray::from(vec![true, true, false, true]);
+        assert_eq!(eq(&dictionary, &scalar).unwrap(), expected);
     }
 
     #[test]
