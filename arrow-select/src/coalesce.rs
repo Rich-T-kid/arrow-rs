@@ -32,17 +32,25 @@ use std::sync::Arc;
 // https://github.com/apache/datafusion/blob/9d2f04996604e709ee440b65f41e7b882f50b788/datafusion/physical-plan/src/coalesce/mod.rs#L26-L25
 
 mod byte_view;
+mod dictionary;
 mod fixed_size_binary;
 mod generic;
 mod primitive;
 
 use byte_view::InProgressByteViewArray;
+use dictionary::InProgressStringDictionaryArray;
 use fixed_size_binary::InProgressFixedSizeBinaryArray;
 use generic::GenericInProgressArray;
 use primitive::InProgressPrimitiveArray;
 
 fn has_sparse_filter_copy(data_type: &DataType) -> bool {
-    data_type.is_primitive() || matches!(data_type, DataType::Utf8View | DataType::BinaryView)
+    data_type.is_primitive()
+        || matches!(data_type, DataType::Utf8View | DataType::BinaryView)
+        || matches!(
+            data_type,
+            DataType::Dictionary(key, value)
+                if key.as_ref() == &DataType::Int32 && value.as_ref() == &DataType::Utf8
+        )
 }
 
 /// Maximum selected row fraction for the fused sparse-filter copy path.
@@ -782,6 +790,11 @@ fn create_in_progress_array(data_type: &DataType, batch_size: usize) -> Box<dyn 
         DataType::Utf8View => Box::new(InProgressByteViewArray::<StringViewType>::new(batch_size)),
         DataType::BinaryView => {
             Box::new(InProgressByteViewArray::<BinaryViewType>::new(batch_size))
+        }
+        DataType::Dictionary(key, value)
+            if key.as_ref() == &DataType::Int32 && value.as_ref() == &DataType::Utf8 =>
+        {
+            Box::new(InProgressStringDictionaryArray::new(batch_size))
         }
         DataType::FixedSizeBinary(size) => {
             Box::new(InProgressFixedSizeBinaryArray::new(*size, batch_size))
@@ -1772,6 +1785,14 @@ mod tests {
         )]));
         let coalescer = BatchCoalescer::new(boolean, 100);
         assert!(coalescer.has_non_specialized_filter_columns);
+
+        let dictionary = Arc::new(Schema::new(vec![Field::new(
+            "dictionary",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        )]));
+        let coalescer = BatchCoalescer::new(dictionary, 100);
+        assert!(!coalescer.has_non_specialized_filter_columns);
     }
 
     #[derive(Debug, Clone, PartialEq)]
