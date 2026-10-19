@@ -141,6 +141,23 @@ impl InProgressArray for InProgressInt32RunArray {
         Ok(())
     }
 
+    fn copy_rows_by_indices(
+        &mut self,
+        source: &ArrayRef,
+        indices: &[u32],
+    ) -> Result<(), ArrowError> {
+        let source = source.as_run::<Int32Type>();
+        let values = source.values().as_primitive::<Int32Type>();
+        let builder = self.builder.get_or_insert_with(|| {
+            PrimitiveRunBuilder::with_capacity(self.batch_size.min(indices.len()))
+        });
+        for &index in indices {
+            Self::append_index(builder, source, values, index as usize);
+        }
+        self.builder_rows += indices.len();
+        Ok(())
+    }
+
     fn finish(&mut self) -> Result<ArrayRef, ArrowError> {
         self.flush_builder();
         let result = match self.buffered_arrays.len() {
@@ -182,12 +199,24 @@ impl InProgressArray for InProgressInt32RunArray {
 mod tests {
     use super::*;
     use crate::filter::FilterBuilder;
-    use arrow_array::BooleanArray;
+    use arrow_array::{BooleanArray, RecordBatch, UInt32Array};
+    use arrow_schema::{Field, Schema};
 
     fn run_array(values: impl IntoIterator<Item = Option<i32>>) -> ArrayRef {
         let mut builder = PrimitiveRunBuilder::<Int32Type, Int32Type>::new();
         builder.extend(values);
         Arc::new(builder.finish())
+    }
+
+    fn decoded(array: &ArrayRef) -> Vec<Option<i32>> {
+        let array = array.as_run::<Int32Type>();
+        let values = array.values().as_primitive::<Int32Type>();
+        (0..array.len())
+            .map(|index| {
+                let physical = array.get_physical_index(index);
+                values.is_valid(physical).then(|| values.value(physical))
+            })
+            .collect()
     }
 
     #[test]
@@ -248,5 +277,70 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(decoded, vec![Some(0), Some(3), Some(9), Some(9), None]);
+    }
+
+    #[test]
+    fn copies_indexed_values_and_preserves_runs() {
+        let source = run_array([Some(1), Some(1), None, None, Some(2), Some(2), Some(3)]);
+        let mut in_progress = InProgressInt32RunArray::new(source.data_type().clone(), 8);
+        in_progress
+            .copy_rows_by_indices(&source, &[6, 5, 4, 2, 0, 1])
+            .unwrap();
+
+        let output = in_progress.finish().unwrap();
+        assert_eq!(
+            decoded(&output),
+            vec![Some(3), Some(2), Some(2), None, Some(1), Some(1)]
+        );
+        assert_eq!(
+            output.as_run::<Int32Type>().run_ends().values(),
+            &[1, 3, 4, 6]
+        );
+    }
+
+    #[test]
+    fn copies_across_sources() {
+        let first = run_array([Some(1), Some(1), Some(2)]);
+        let second = run_array([None, Some(3), Some(3)]);
+        let mut in_progress = InProgressInt32RunArray::new(first.data_type().clone(), 8);
+        in_progress.copy_rows_by_indices(&first, &[2, 0]).unwrap();
+        in_progress.copy_rows_by_indices(&second, &[0, 2]).unwrap();
+
+        let output = in_progress.finish().unwrap();
+        assert_eq!(decoded(&output), vec![Some(2), Some(1), None, Some(3)]);
+    }
+
+    #[test]
+    fn routed_take_preserves_values_and_rejects_oob_before_mutation() {
+        let source = run_array((0..1024).map(|index| match index % 3 {
+            0 => Some(1),
+            1 => None,
+            _ => Some(2),
+        }));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "r",
+            source.data_type().clone(),
+            true,
+        )]));
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::clone(&source)]).unwrap();
+
+        let mut coalescer = super::super::BatchCoalescer::new(Arc::clone(&schema), 16);
+        coalescer
+            .push_batch_with_indices(batch.clone(), &UInt32Array::from(vec![3, 1, 2, 0]))
+            .unwrap();
+        coalescer.finish_buffered_batch().unwrap();
+        let output = coalescer.next_completed_batch().unwrap();
+        assert_eq!(
+            decoded(output.column(0)),
+            vec![Some(1), None, Some(2), Some(1)]
+        );
+
+        let mut coalescer = super::super::BatchCoalescer::new(schema, 16);
+        let error = coalescer
+            .push_batch_with_indices(batch, &UInt32Array::from(vec![0, 1024]))
+            .unwrap_err();
+        assert!(error.to_string().contains("take index 1024 out of bounds"));
+        assert_eq!(coalescer.get_buffered_rows(), 0);
+        assert!(!coalescer.has_completed_batch());
     }
 }

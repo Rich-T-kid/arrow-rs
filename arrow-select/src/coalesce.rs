@@ -22,9 +22,10 @@
 //! [`take`]: crate::take::take
 use crate::filter::{FilterBuilder, FilterPredicate, FilterSelection};
 use crate::interleave::interleave_record_batch;
-use crate::take::take_record_batch;
+use crate::take::{take, take_record_batch};
 use arrow_array::types::{BinaryViewType, StringViewType};
-use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch, downcast_primitive};
+use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch, UInt32Array, downcast_primitive};
+use arrow_buffer::{Buffer, ScalarBuffer};
 use arrow_schema::{ArrowError, DataType, SchemaRef};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -52,6 +53,34 @@ fn has_sparse_filter_copy(data_type: &DataType) -> bool {
                 if run_ends.data_type() == &DataType::Int32
                     && values.data_type() == &DataType::Int32
         )
+}
+
+fn has_direct_take(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::RunEndEncoded(run_ends, values)
+            if run_ends.data_type() == &DataType::Int32
+                && values.data_type() == &DataType::Int32
+    )
+}
+
+const INDEXED_COPY_MAX_SELECTIVITY_DENOMINATOR: usize = 16;
+
+fn should_use_indexed_copy(input_rows: usize, selected_rows: usize) -> bool {
+    selected_rows <= input_rows / INDEXED_COPY_MAX_SELECTIVITY_DENOMINATOR
+}
+
+fn validate_indices_bounds(indices: &[u32], source_len: usize) -> Result<(), ArrowError> {
+    if let Some(index) = indices
+        .iter()
+        .copied()
+        .find(|&index| index as usize >= source_len)
+    {
+        return Err(ArrowError::InvalidArgumentError(format!(
+            "take index {index} out of bounds for array of {source_len} rows"
+        )));
+    }
+    Ok(())
 }
 
 /// Maximum selected row fraction for the fused sparse-filter copy path.
@@ -168,6 +197,8 @@ pub struct BatchCoalescer {
     in_progress_arrays: Vec<Box<dyn InProgressArray>>,
     /// True if some column still needs the materialized filter path.
     has_non_specialized_filter_columns: bool,
+    /// True if every column supports direct indexed copying.
+    has_only_direct_take_columns: bool,
     /// Buffered row count. Always less than `batch_size`
     buffered_rows: usize,
     /// Completed batches
@@ -189,6 +220,10 @@ impl BatchCoalescer {
             .fields()
             .iter()
             .any(|field| !has_sparse_filter_copy(field.data_type()));
+        let has_only_direct_take_columns = schema
+            .fields()
+            .iter()
+            .all(|field| has_direct_take(field.data_type()));
         let in_progress_arrays = schema
             .fields()
             .iter()
@@ -200,6 +235,7 @@ impl BatchCoalescer {
             target_batch_size,
             in_progress_arrays,
             has_non_specialized_filter_columns,
+            has_only_direct_take_columns,
             // We will for sure store at least one completed batch
             completed: VecDeque::with_capacity(1),
             buffered_rows: 0,
@@ -345,9 +381,55 @@ impl BatchCoalescer {
         batch: RecordBatch,
         indices: &dyn Array,
     ) -> Result<(), ArrowError> {
-        // todo: optimize this to avoid materializing (copying the results of take indices to a new batch)
+        let fast_path_allowed = self.has_only_direct_take_columns
+            && should_use_indexed_copy(batch.num_rows(), indices.len())
+            && self
+                .biggest_coalesce_batch_size
+                .is_none_or(|limit| indices.len() <= limit);
+        if fast_path_allowed
+            && let Some(indices) = indices.as_any().downcast_ref::<UInt32Array>()
+            && indices.null_count() == 0
+        {
+            return self.push_batch_with_u32_indices(batch, indices.values());
+        }
+
         let taken_batch = take_record_batch(&batch, indices)?;
         self.push_batch(taken_batch)
+    }
+
+    fn push_batch_with_u32_indices(
+        &mut self,
+        batch: RecordBatch,
+        indices: &[u32],
+    ) -> Result<(), ArrowError> {
+        if indices.is_empty() {
+            return Ok(());
+        }
+        let columns = batch.columns();
+        if columns.len() != self.in_progress_arrays.len() {
+            return Err(ArrowError::InvalidArgumentError(format!(
+                "Batch has {} columns but BatchCoalescer expects {}",
+                columns.len(),
+                self.in_progress_arrays.len()
+            )));
+        }
+        validate_indices_bounds(indices, batch.num_rows())?;
+
+        let mut offset = 0;
+        while offset < indices.len() {
+            let room = self.target_batch_size - self.buffered_rows;
+            let take_n = (indices.len() - offset).min(room);
+            let chunk = &indices[offset..offset + take_n];
+            for (in_progress, column) in self.in_progress_arrays.iter_mut().zip(columns) {
+                in_progress.copy_rows_by_indices(column, chunk)?;
+            }
+            self.buffered_rows += take_n;
+            offset += take_n;
+            if self.buffered_rows >= self.target_batch_size {
+                self.finish_buffered_batch()?;
+            }
+        }
+        Ok(())
     }
 
     /// Push rows gathered from multiple `batches` into the Coalescer.
@@ -869,6 +951,25 @@ trait InProgressArray: std::fmt::Debug + Send + Sync {
             }
             FilterSelection::Indices(indices) => indices.try_for_each(|idx| self.copy_rows(idx, 1)),
         }
+    }
+
+    /// Copy bounds-checked rows at `indices` from `source`.
+    fn copy_rows_by_indices(
+        &mut self,
+        source: &ArrayRef,
+        indices: &[u32],
+    ) -> Result<(), ArrowError> {
+        if indices.is_empty() {
+            return Ok(());
+        }
+        let buffer = Buffer::from_slice_ref(indices);
+        let values = ScalarBuffer::new(buffer, 0, indices.len());
+        let index_array = UInt32Array::new(values, None);
+        let taken = take(source.as_ref(), &index_array, None)?;
+        self.set_source(Some(taken));
+        let result = self.copy_rows(0, indices.len());
+        self.set_source(None);
+        result
     }
 
     /// Finish the currently in-progress array and return it as an `ArrayRef`
