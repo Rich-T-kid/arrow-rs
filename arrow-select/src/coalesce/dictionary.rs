@@ -18,10 +18,11 @@
 use super::InProgressArray;
 use crate::concat::concat;
 use crate::filter::{FilterPredicate, FilterSelection};
+use crate::take::take;
 use arrow_array::builder::StringDictionaryBuilder;
 use arrow_array::cast::AsArray;
 use arrow_array::types::Int32Type;
-use arrow_array::{Array, ArrayRef, DictionaryArray, StringArray};
+use arrow_array::{Array, ArrayRef, DictionaryArray, StringArray, UInt32Array};
 use arrow_schema::ArrowError;
 use std::sync::Arc;
 
@@ -99,6 +100,15 @@ impl InProgressStringDictionaryArray {
         let filtered = filter.filter(source)?;
         self.total_size_of_non_shared_buffers += filtered.get_array_memory_size();
         self.buffered_arrays.push(filtered);
+        Ok(())
+    }
+
+    fn buffer_taken(&mut self, source: &dyn Array, indices: &[u32]) -> Result<(), ArrowError> {
+        self.flush_builder();
+        let indices = UInt32Array::from(indices.to_vec());
+        let array = take(source, &indices, None)?;
+        self.total_size_of_non_shared_buffers += array.get_array_memory_size();
+        self.buffered_arrays.push(array);
         Ok(())
     }
 }
@@ -179,6 +189,34 @@ impl InProgressArray for InProgressStringDictionaryArray {
         Ok(())
     }
 
+    fn copy_rows_by_indices(
+        &mut self,
+        source: &ArrayRef,
+        indices: &[u32],
+    ) -> Result<(), ArrowError> {
+        let dictionary = source.as_dictionary::<Int32Type>();
+        let values = dictionary.values().as_string::<i32>();
+        if values.null_count() != 0 {
+            return self.buffer_taken(source.as_ref(), indices);
+        }
+
+        let builder = self.builder.get_or_insert_with(|| {
+            StringDictionaryBuilder::with_capacity(
+                self.batch_size,
+                values.len(),
+                values.get_array_memory_size(),
+            )
+        });
+        let mut appended_value_bytes = 0;
+        for &index in indices {
+            appended_value_bytes +=
+                Self::append_index(builder, dictionary, values, index as usize)?;
+        }
+        self.builder_rows += indices.len();
+        self.builder_value_bytes += appended_value_bytes;
+        Ok(())
+    }
+
     fn finish(&mut self) -> Result<ArrayRef, ArrowError> {
         self.flush_builder();
         let result = match self.buffered_arrays.len() {
@@ -214,8 +252,8 @@ impl InProgressArray for InProgressStringDictionaryArray {
 mod tests {
     use super::*;
     use crate::filter::FilterBuilder;
-    use arrow_array::{BooleanArray, Int32Array};
-    use arrow_schema::DataType;
+    use arrow_array::{BooleanArray, Int32Array, RecordBatch, UInt32Array};
+    use arrow_schema::{DataType, Field, Schema};
 
     fn dictionary(values: &[Option<&str>]) -> ArrayRef {
         let mut builder = StringDictionaryBuilder::<Int32Type>::new();
@@ -230,6 +268,15 @@ mod tests {
             }
         }
         Arc::new(builder.finish())
+    }
+
+    fn decoded(array: &ArrayRef) -> Vec<Option<&str>> {
+        let array = array.as_dictionary::<Int32Type>();
+        let values = array.values().as_string::<i32>();
+        array
+            .keys_iter()
+            .map(|key| key.map(|key| values.value(key)))
+            .collect()
     }
 
     #[test]
@@ -318,5 +365,73 @@ mod tests {
         assert!(output.nulls().is_none());
         assert_eq!(output.logical_null_count(), 1);
         assert_eq!(output.keys().values(), &[1, 0]);
+    }
+
+    #[test]
+    fn copies_indexed_values_and_unifies_dictionaries() {
+        let first = dictionary(&[Some("a"), Some("b"), None, Some("a")]);
+        let second = dictionary(&[Some("c"), Some("a"), Some("b")]);
+        let mut in_progress = InProgressStringDictionaryArray::new(8);
+        in_progress
+            .copy_rows_by_indices(&first, &[3, 2, 1])
+            .unwrap();
+        in_progress.copy_rows_by_indices(&second, &[0, 1]).unwrap();
+
+        let output = in_progress.finish().unwrap();
+        assert_eq!(
+            decoded(&output),
+            vec![Some("a"), None, Some("b"), Some("c"), Some("a")]
+        );
+    }
+
+    #[test]
+    fn indexed_dictionary_value_nulls_retain_their_representation() {
+        let keys = Int32Array::from(vec![0, 1, 0]);
+        let values = StringArray::from(vec![Some("a"), None]);
+        let source = Arc::new(DictionaryArray::new(keys, Arc::new(values))) as ArrayRef;
+        let mut in_progress = InProgressStringDictionaryArray::new(8);
+        in_progress.copy_rows_by_indices(&source, &[1, 2]).unwrap();
+
+        let output = in_progress.finish().unwrap();
+        let output = output.as_dictionary::<Int32Type>();
+        assert!(output.nulls().is_none());
+        assert_eq!(output.logical_null_count(), 1);
+        assert_eq!(output.keys().values(), &[1, 0]);
+    }
+
+    #[test]
+    fn routed_take_preserves_values_and_rejects_oob_before_mutation() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "d",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        )]));
+        let values = (0..1024)
+            .map(|index| match index % 3 {
+                0 => Some("a"),
+                1 => None,
+                _ => Some("b"),
+            })
+            .collect::<Vec<_>>();
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![dictionary(&values)]).unwrap();
+
+        let mut coalescer = super::super::BatchCoalescer::new(Arc::clone(&schema), 16);
+        coalescer
+            .push_batch_with_indices(batch.clone(), &UInt32Array::from(vec![3, 1, 2, 0]))
+            .unwrap();
+        coalescer.finish_buffered_batch().unwrap();
+        let output = coalescer.next_completed_batch().unwrap();
+        assert_eq!(
+            decoded(output.column(0)),
+            vec![Some("a"), None, Some("b"), Some("a")]
+        );
+
+        let mut coalescer = super::super::BatchCoalescer::new(schema, 16);
+        let error = coalescer
+            .push_batch_with_indices(batch, &UInt32Array::from(vec![0, 1024]))
+            .unwrap_err();
+        assert!(error.to_string().contains("take index 1024 out of bounds"));
+        assert_eq!(coalescer.get_buffered_rows(), 0);
+        assert!(!coalescer.has_completed_batch());
     }
 }
