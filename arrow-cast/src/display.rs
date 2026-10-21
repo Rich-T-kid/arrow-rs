@@ -33,6 +33,7 @@ use arrow_array::timezone::Tz;
 use arrow_array::types::*;
 use arrow_array::*;
 use arrow_buffer::ArrowNativeType;
+use arrow_data::decimal::write_decimal;
 use arrow_schema::*;
 use chrono::format::{Item, StrftimeItems};
 use chrono::{NaiveDate, NaiveDateTime, SecondsFormat, TimeZone, Utc};
@@ -147,7 +148,7 @@ impl Hash for FormatOptions<'_> {
         self.types_info.hash(state);
         self.quoted_strings.hash(state);
         self.formatter_factory
-            .map(|f| f as *const dyn ArrayFormatterFactory)
+            .map(std::ptr::from_ref::<dyn ArrayFormatterFactory>)
             .hash(state);
     }
 }
@@ -673,7 +674,7 @@ impl<'a, F: DisplayIndexState<'a> + Array> DisplayIndex for ArrayFormat<'a, F> {
 
 impl DisplayIndex for &BooleanArray {
     fn write(&self, idx: usize, f: &mut dyn Write) -> FormatResult {
-        write!(f, "{}", self.value(idx))?;
+        f.write_str(if self.value(idx) { "true" } else { "false" })?;
         Ok(())
     }
 }
@@ -736,14 +737,14 @@ impl DisplayIndex for &PrimitiveArray<Float16Type> {
 macro_rules! decimal_display {
     ($($t:ty),+) => {
         $(impl<'a> DisplayIndexState<'a> for &'a PrimitiveArray<$t> {
-            type State = (u8, i8);
+            type State = i8;
 
             fn prepare(&self, _options: &FormatOptions<'a>) -> Result<Self::State, ArrowError> {
-                Ok((self.precision(), self.scale()))
+                Ok(self.scale())
             }
 
-            fn write(&self, s: &Self::State, idx: usize, f: &mut dyn Write) -> FormatResult {
-                write!(f, "{}", <$t>::format_decimal(self.values()[idx], s.0, s.1))?;
+            fn write(&self, scale: &Self::State, idx: usize, f: &mut dyn Write) -> FormatResult {
+                write_decimal(f, self.values()[idx], *scale)?;
                 Ok(())
             }
         })+
@@ -971,7 +972,7 @@ impl DisplayIndex for &PrimitiveArray<IntervalYearMonthType> {
         let years = (interval / 12_f64).floor();
         let month = interval - (years * 12_f64);
 
-        write!(f, "{years} years {month} mons",)?;
+        write!(f, "{years} years {month} mons")?;
         Ok(())
     }
 }
@@ -1139,9 +1140,9 @@ impl<'a, O: OffsetSizeTrait> DisplayIndexState<'a> for &'a GenericStringArray<O>
     fn write(&self, state: &Self::State, idx: usize, f: &mut dyn Write) -> FormatResult {
         let value = self.value(idx);
         if *state {
-            write!(f, "{:?}", value)?;
+            write!(f, "{value:?}")?;
         } else {
-            write!(f, "{}", value)?;
+            write!(f, "{value}")?;
         }
         Ok(())
     }
@@ -1157,9 +1158,9 @@ impl<'a> DisplayIndexState<'a> for &'a StringViewArray {
     fn write(&self, state: &Self::State, idx: usize, f: &mut dyn Write) -> FormatResult {
         let value = self.value(idx);
         if *state {
-            write!(f, "{:?}", value)?;
+            write!(f, "{value:?}")?;
         } else {
-            write!(f, "{}", value)?;
+            write!(f, "{value}")?;
         }
         Ok(())
     }
@@ -1212,9 +1213,8 @@ impl<'a, K: RunEndIndexType> DisplayIndexState<'a> for &'a RunArray<K> {
     type State = ArrayFormatter<'a>;
 
     fn prepare(&self, options: &FormatOptions<'a>) -> Result<Self::State, ArrowError> {
-        let field = match (*self).data_type() {
-            DataType::RunEndEncoded(_, values_field) => values_field,
-            _ => unreachable!(),
+        let DataType::RunEndEncoded(_, field) = (*self).data_type() else {
+            unreachable!()
         };
         make_array_formatter(self.values().as_ref(), options, Some(field))
     }
@@ -1287,9 +1287,8 @@ impl<'a> DisplayIndexState<'a> for &'a FixedSizeListArray {
     type State = (usize, ArrayFormatter<'a>);
 
     fn prepare(&self, options: &FormatOptions<'a>) -> Result<Self::State, ArrowError> {
-        let field = match (*self).data_type() {
-            DataType::FixedSizeList(f, _) => f,
-            _ => unreachable!(),
+        let DataType::FixedSizeList(field, _) = (*self).data_type() else {
+            unreachable!()
         };
         let formatter =
             make_array_formatter(self.values().as_ref(), options, Some(field.as_ref()))?;
@@ -1311,9 +1310,8 @@ impl<'a> DisplayIndexState<'a> for &'a StructArray {
     type State = Vec<FieldDisplay<'a>>;
 
     fn prepare(&self, options: &FormatOptions<'a>) -> Result<Self::State, ArrowError> {
-        let fields = match (*self).data_type() {
-            DataType::Struct(f) => f,
-            _ => unreachable!(),
+        let DataType::Struct(fields) = (*self).data_type() else {
+            unreachable!()
         };
 
         self.columns()
@@ -1376,9 +1374,8 @@ impl<'a> DisplayIndexState<'a> for &'a UnionArray {
     type State = (Vec<Option<FieldDisplay<'a>>>, UnionMode);
 
     fn prepare(&self, options: &FormatOptions<'a>) -> Result<Self::State, ArrowError> {
-        let (fields, mode) = match (*self).data_type() {
-            DataType::Union(fields, mode) => (fields, mode),
-            _ => unreachable!(),
+        let DataType::Union(fields, mode) = (*self).data_type() else {
+            unreachable!()
         };
 
         let max_id = fields.iter().map(|(id, _)| id).max().unwrap_or_default() as usize;
@@ -1436,7 +1433,6 @@ pub fn lexical_to_string<N: lexical_core::ToLexical>(n: N) -> String {
 mod tests {
     use super::*;
     use arrow_array::builder::StringRunBuilder;
-
     /// Test to verify options can be constant. See #4580
     const TEST_CONST_OPTIONS: FormatOptions<'static> = FormatOptions::new()
         .with_date_format(Some("foo"))
@@ -1626,7 +1622,7 @@ mod tests {
     }
 
     #[test]
-    fn test_string_run_arry_to_string() {
+    fn test_string_run_array_to_string() {
         let mut builder = StringRunBuilder::<Int32Type>::new();
 
         builder.append_value("input_value");

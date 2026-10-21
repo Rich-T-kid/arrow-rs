@@ -3036,8 +3036,16 @@ mod tests {
     #[test]
     fn test_run_end_encoded() {
         let ree_dt = DataType::RunEndEncoded(
-            Arc::new(ArrowField::new("run_ends", DataType::Int32, false)),
-            Arc::new(ArrowField::new("values", DataType::Utf8, false)),
+            Arc::new(ArrowField::new(
+                ArrowField::REE_RUN_ENDS_FIELD_DEFAULT_NAME,
+                DataType::Int32,
+                false,
+            )),
+            Arc::new(ArrowField::new(
+                ArrowField::REE_VALUES_FIELD_DEFAULT_NAME,
+                DataType::Utf8,
+                false,
+            )),
         );
         let s = single_field_schema(ArrowField::new("text", ree_dt, false));
         let avro = AvroSchema::try_from(&s).unwrap();
@@ -3241,7 +3249,7 @@ mod tests {
         let schema: Schema = serde_json::from_str(schema_json).expect("schema should parse");
         match &schema {
             Schema::Complex(ComplexType::Record(_)) => {}
-            other => panic!("expected record schema, got: {:?}", other),
+            other => panic!("expected record schema, got: {other:?}"),
         }
         // Avro to Arrow conversion
         let field = crate::codec::AvroField::try_from(&schema)

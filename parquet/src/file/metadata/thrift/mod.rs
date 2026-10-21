@@ -51,7 +51,7 @@ use crate::{
     parquet_thrift::{
         ElementType, FieldType, ReadThrift, ThriftCompactInputProtocol,
         ThriftCompactOutputProtocol, ThriftSliceInputProtocol, WriteThrift, WriteThriftField,
-        read_thrift_vec, validate_list_type,
+        check_list_size, read_thrift_vec, validate_list_type,
     },
     schema::types::{
         ColumnDescriptor, SchemaDescriptor, TypePtr, num_nodes, parquet_schema_from_array,
@@ -397,9 +397,7 @@ fn validate_column_metadata(mask: u16) -> Result<()> {
     Ok(())
 }
 
-fn read_encoding_stats_as_mask<'a>(
-    prot: &mut ThriftSliceInputProtocol<'a>,
-) -> Result<EncodingMask> {
+fn read_encoding_stats_as_mask(prot: &mut ThriftSliceInputProtocol<'_>) -> Result<EncodingMask> {
     // read the vector of stats, setting mask bits for data pages
     let mut mask = 0i32;
     let list_ident = prot.read_list_begin()?;
@@ -419,8 +417,8 @@ fn read_encoding_stats_as_mask<'a>(
 // Decode `ColumnMetaData`. Returns a mask of all required fields that were observed.
 // This mask can be passed to `validate_column_metadata`.
 #[expect(clippy::useless_let_if_seq)] // the `let mut … if let …` below is more readable than the suggestion
-fn read_column_metadata<'a>(
-    prot: &mut ThriftSliceInputProtocol<'a>,
+fn read_column_metadata(
+    prot: &mut ThriftSliceInputProtocol<'_>,
     column: &mut ColumnChunkMetaData,
     col_index: usize,
     options: Option<&ParquetMetaDataOptions>,
@@ -541,17 +539,17 @@ fn read_column_metadata<'a>(
             _ => {
                 prot.skip(field_ident.field_type)?;
             }
-        };
+        }
         last_field_id = field_ident.id;
     }
 
     Ok(seen_mask)
 }
 
-// using ThriftSliceInputProtocol rather than ThriftCompactInputProtocl trait because
+// using ThriftSliceInputProtocol rather than ThriftCompactInputProtocol trait because
 // these are all internal and operate on slices.
-fn read_column_chunk<'a>(
-    prot: &mut ThriftSliceInputProtocol<'a>,
+fn read_column_chunk(
+    prot: &mut ThriftSliceInputProtocol<'_>,
     column_descr: &Arc<ColumnDescriptor>,
     col_index: usize,
     options: Option<&ParquetMetaDataOptions>,
@@ -617,14 +615,14 @@ fn read_column_chunk<'a>(
             _ => {
                 prot.skip(field_ident.field_type)?;
             }
-        };
+        }
         last_field_id = field_ident.id;
     }
 
     // the only required field from ColumnChunk
     if !has_file_offset {
         return Err(general_err!("Required field file_offset is missing"));
-    };
+    }
 
     // if encrypted just return. we'll decrypt after finishing the footer and populate the rest.
     #[cfg(feature = "encryption")]
@@ -709,7 +707,7 @@ fn read_row_group(
             _ => {
                 prot.skip(field_ident.field_type)?;
             }
-        };
+        }
         last_field_id = field_ident.id;
     }
 
@@ -822,7 +820,10 @@ pub(crate) fn parquet_metadata_from_bytes(
                 let list_ident = prot.read_list_begin()?;
                 // check for list of struct
                 validate_list_type(ElementType::Struct, &list_ident)?;
-                let mut rg_vec = Vec::with_capacity(list_ident.size as usize);
+                let size = list_ident.size as usize;
+                // Validate list size.
+                check_list_size(prot.remaining_bytes(), size)?;
+                let mut rg_vec = Vec::with_capacity(size);
 
                 for _ in 0..list_ident.size {
                     rg_vec.push(read_row_group(&mut prot, schema_descr, options)?);
@@ -853,7 +854,7 @@ pub(crate) fn parquet_metadata_from_bytes(
             _ => {
                 prot.skip(field_ident.field_type)?;
             }
-        };
+        }
         last_field_id = field_ident.id;
     }
     let Some(version) = version else {
@@ -1038,7 +1039,7 @@ impl DataPageHeader {
                 _ => {
                     prot.skip(field_ident.field_type)?;
                 }
-            };
+            }
             last_field_id = field_ident.id;
         }
         let Some(num_values) = num_values else {
@@ -1131,7 +1132,7 @@ impl DataPageHeaderV2 {
                 _ => {
                     prot.skip(field_ident.field_type)?;
                 }
-            };
+            }
             last_field_id = field_ident.id;
         }
         let Some(num_values) = num_values else {
@@ -1180,7 +1181,7 @@ pub(crate) struct PageHeader {
   /// Compressed (and potentially encrypted) page size in bytes, not including this header
   3: required i32 compressed_page_size
 
-  /// The 32-bit CRC checksum for the page, to be be calculated as follows:
+  /// The 32-bit CRC checksum for the page, to be calculated as follows:
   4: optional i32 crc
 
   // Headers for page specific data.  One only will be set.
@@ -1249,7 +1250,7 @@ impl PageHeader {
                 _ => {
                     prot.skip(field_ident.field_type)?;
                 }
-            };
+            }
             last_field_id = field_ident.id;
         }
         let Some(type_) = type_ else {
@@ -1418,11 +1419,11 @@ pub(super) struct FileMeta<'a> {
 //   8: optional EncryptionAlgorithm encryption_algorithm
 //   9: optional binary footer_signing_key_metadata
 // }
-impl<'a> WriteThrift for FileMeta<'a> {
+impl WriteThrift for FileMeta<'_> {
     const ELEMENT_TYPE: ElementType = ElementType::Struct;
 
     // needed for last_field_id w/o encryption
-    #[allow(unused_assignments)]
+    #[cfg_attr(not(feature = "encryption"), expect(unused_assignments))]
     fn write_thrift<W: Write>(&self, writer: &mut ThriftCompactOutputProtocol<W>) -> Result<()> {
         writer.set_write_path_in_schema(self.write_path_in_schema);
         // only write ordinal if all values will fit in an i16
@@ -1613,7 +1614,7 @@ impl WriteThrift for RowGroupMetaData {
 impl WriteThrift for ColumnChunkMetaData {
     const ELEMENT_TYPE: ElementType = ElementType::Struct;
 
-    #[allow(unused_assignments)]
+    #[cfg_attr(not(feature = "encryption"), expect(unused_assignments))]
     fn write_thrift<W: Write>(&self, writer: &mut ThriftCompactOutputProtocol<W>) -> Result<()> {
         let mut last_field_id = 0i16;
         if let Some(file_path) = self.file_path() {
@@ -1754,7 +1755,7 @@ pub(crate) mod tests {
 
     // for testing. decode thrift encoded RowGroup
     pub(crate) fn read_row_group(
-        buf: &mut [u8],
+        buf: &[u8],
         schema_descr: Arc<SchemaDescriptor>,
     ) -> Result<RowGroupMetaData> {
         let mut reader = ThriftSliceInputProtocol::new(buf);
@@ -1762,14 +1763,14 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn read_column_chunk(
-        buf: &mut [u8],
+        buf: &[u8],
         column_descr: Arc<ColumnDescriptor>,
     ) -> Result<ColumnChunkMetaData> {
         read_column_chunk_with_options(buf, column_descr, None)
     }
 
     pub(crate) fn read_column_chunk_with_options(
-        buf: &mut [u8],
+        buf: &[u8],
         column_descr: Arc<ColumnDescriptor>,
         options: Option<&ParquetMetaDataOptions>,
     ) -> Result<ColumnChunkMetaData> {
@@ -1806,7 +1807,7 @@ pub(crate) mod tests {
         Ok(buf)
     }
 
-    pub(crate) fn buf_to_schema_list<'a>(buf: &'a mut Vec<u8>) -> Result<Vec<SchemaElement<'a>>> {
+    pub(crate) fn buf_to_schema_list(buf: &mut Vec<u8>) -> Result<Vec<SchemaElement<'_>>> {
         let mut prot = ThriftSliceInputProtocol::new(buf.as_mut_slice());
         read_thrift_vec(&mut prot)
     }
@@ -2095,6 +2096,49 @@ pub(crate) mod tests {
         assert_eq!(
             roundtrip_rg_ordinals(&[None, Some(1), Some(2)]),
             vec![None, Some(1), Some(2)],
+        );
+    }
+
+    /// Test row group on-wire size validation.
+    #[test]
+    fn row_group_count_exceeding_remaining_input_is_rejected() {
+        use crate::file::metadata::thrift::parquet_metadata_from_bytes;
+        use crate::parquet_thrift::{FieldType, WriteThriftField};
+        use crate::schema::types::Type as SchemaType;
+
+        // Minimal valid schema: a group with one INT32 column.
+        let field = SchemaType::primitive_type_builder("c", PhysicalType::INT32)
+            .build()
+            .unwrap();
+        let schema = SchemaType::group_type_builder("schema")
+            .with_fields(vec![Arc::new(field)])
+            .build()
+            .unwrap();
+        let root: TypePtr = Arc::new(schema);
+        let schema_len = num_nodes(&root).unwrap();
+
+        let mut buf = Vec::new();
+        let mut w = ThriftCompactOutputProtocol::new(&mut buf);
+        // FileMetaData field 1: version.
+        1i32.write_thrift_field(&mut w, 1, 0).unwrap();
+        // field 2: schema (required before row groups are read).
+        w.write_field_begin(FieldType::List, 2, 1).unwrap();
+        w.write_list_begin(ElementType::Struct, schema_len).unwrap();
+        write_schema(&root, &mut w).unwrap();
+        // field 3: num_rows.
+        0i64.write_thrift_field(&mut w, 3, 2).unwrap();
+        // field 4: row_groups, declaring 1024 structs with no element bytes
+        // after the header. Only the struct-stop byte remains.
+        w.write_field_begin(FieldType::List, 4, 3).unwrap();
+        w.write_list_begin(ElementType::Struct, 1024).unwrap();
+        w.write_struct_end().unwrap();
+
+        let err = parquet_metadata_from_bytes(&buf, None)
+            .expect_err("over-declared row-group count must be rejected")
+            .to_string();
+        assert!(
+            err.contains("exceeds remaining input length"),
+            "expected a remaining-input bound error, got: {err}"
         );
     }
 }

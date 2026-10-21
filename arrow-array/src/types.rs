@@ -25,7 +25,7 @@ use crate::timezone::Tz;
 use crate::{ArrowNativeTypeOp, OffsetSizeTrait};
 use arrow_buffer::{Buffer, OffsetBuffer, i256};
 use arrow_data::decimal::{
-    format_decimal_str, is_validate_decimal_precision, is_validate_decimal32_precision,
+    DecimalNativeType, is_validate_decimal_precision, is_validate_decimal32_precision,
     is_validate_decimal64_precision, is_validate_decimal256_precision, validate_decimal_precision,
     validate_decimal32_precision, validate_decimal64_precision, validate_decimal256_precision,
 };
@@ -952,7 +952,7 @@ impl Date32Type {
     #[deprecated(since = "58.0.0", note = "Use to_naive_date_opt instead.")]
     pub fn to_naive_date(i: <Date32Type as ArrowPrimitiveType>::Native) -> NaiveDate {
         Self::to_naive_date_opt(i)
-            .unwrap_or_else(|| panic!("Date32Type::to_naive_date overflowed for date: {i}",))
+            .unwrap_or_else(|| panic!("Date32Type::to_naive_date overflowed for date: {i}"))
     }
 
     /// Converts an arrow Date32Type into a chrono::NaiveDate
@@ -963,8 +963,9 @@ impl Date32Type {
     ///
     /// Returns `Some(NaiveDate)` if it fits, `None` otherwise.
     pub fn to_naive_date_opt(i: <Date32Type as ArrowPrimitiveType>::Native) -> Option<NaiveDate> {
-        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-        Duration::try_days(i as i64).and_then(|d| epoch.checked_add_signed(d))
+        let epoch = NaiveDate::default();
+        let d = Duration::try_days(i as i64)?;
+        epoch.checked_add_signed(d)
     }
 
     /// Converts a chrono::NaiveDate into an arrow Date32Type
@@ -973,7 +974,7 @@ impl Date32Type {
     ///
     /// * `d` - The NaiveDate to convert
     pub fn from_naive_date(d: NaiveDate) -> <Date32Type as ArrowPrimitiveType>::Native {
-        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+        let epoch = NaiveDate::default();
         d.sub(epoch).num_days() as <Date32Type as ArrowPrimitiveType>::Native
     }
 
@@ -996,7 +997,7 @@ impl Date32Type {
         delta: <IntervalYearMonthType as ArrowPrimitiveType>::Native,
     ) -> <Date32Type as ArrowPrimitiveType>::Native {
         Self::add_year_months_opt(date, delta).unwrap_or_else(|| {
-            panic!("Date32Type::add_year_months overflowed for date: {date}, delta: {delta}",)
+            panic!("Date32Type::add_year_months overflowed for date: {date}, delta: {delta}")
         })
     }
 
@@ -1037,7 +1038,7 @@ impl Date32Type {
         delta: <IntervalDayTimeType as ArrowPrimitiveType>::Native,
     ) -> <Date32Type as ArrowPrimitiveType>::Native {
         Self::add_day_time_opt(date, delta).unwrap_or_else(|| {
-            panic!("Date32Type::add_day_time overflowed for date: {date}, delta: {delta:?}",)
+            panic!("Date32Type::add_day_time overflowed for date: {date}, delta: {delta:?}")
         })
     }
 
@@ -1079,7 +1080,7 @@ impl Date32Type {
         delta: <IntervalMonthDayNanoType as ArrowPrimitiveType>::Native,
     ) -> <Date32Type as ArrowPrimitiveType>::Native {
         Self::add_month_day_nano_opt(date, delta).unwrap_or_else(|| {
-            panic!("Date32Type::add_month_day_nano overflowed for date: {date}, delta: {delta:?}",)
+            panic!("Date32Type::add_month_day_nano overflowed for date: {date}, delta: {delta:?}")
         })
     }
 
@@ -1122,7 +1123,7 @@ impl Date32Type {
         delta: <IntervalYearMonthType as ArrowPrimitiveType>::Native,
     ) -> <Date32Type as ArrowPrimitiveType>::Native {
         Self::subtract_year_months_opt(date, delta).unwrap_or_else(|| {
-            panic!("Date32Type::subtract_year_months overflowed for date: {date}, delta: {delta}",)
+            panic!("Date32Type::subtract_year_months overflowed for date: {date}, delta: {delta}")
         })
     }
 
@@ -1163,7 +1164,7 @@ impl Date32Type {
         delta: <IntervalDayTimeType as ArrowPrimitiveType>::Native,
     ) -> <Date32Type as ArrowPrimitiveType>::Native {
         Self::subtract_day_time_opt(date, delta).unwrap_or_else(|| {
-            panic!("Date32Type::subtract_day_time overflowed for date: {date}, delta: {delta:?}",)
+            panic!("Date32Type::subtract_day_time overflowed for date: {date}, delta: {delta:?}")
         })
     }
 
@@ -1244,8 +1245,9 @@ impl Date64Type {
     ///
     /// Returns `Some(NaiveDateTime)` if it fits, `None` otherwise.
     pub fn to_naive_date_opt(i: <Date64Type as ArrowPrimitiveType>::Native) -> Option<NaiveDate> {
-        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-        Duration::try_milliseconds(i).and_then(|d| epoch.checked_add_signed(d))
+        let epoch = NaiveDate::default();
+        let d = Duration::try_milliseconds(i)?;
+        epoch.checked_add_signed(d)
     }
 
     /// Converts a chrono::NaiveDate into an arrow Date64Type
@@ -1254,7 +1256,7 @@ impl Date64Type {
     ///
     /// * `d` - The NaiveDate to convert
     pub fn from_naive_date(d: NaiveDate) -> <Date64Type as ArrowPrimitiveType>::Native {
-        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+        let epoch = NaiveDate::default();
         d.sub(epoch).num_milliseconds()
     }
 
@@ -1398,7 +1400,7 @@ mod decimal {
 /// [`Decimal128Array`]: crate::array::Decimal128Array
 /// [`Decimal256Array`]: crate::array::Decimal256Array
 pub trait DecimalType:
-    'static + Send + Sync + ArrowPrimitiveType + decimal::DecimalTypeSealed
+    'static + Send + Sync + ArrowPrimitiveType<Native: DecimalNativeType> + decimal::DecimalTypeSealed
 {
     /// Width of the type
     const BYTE_LENGTH: usize;
@@ -1416,8 +1418,12 @@ pub trait DecimalType:
     /// "Decimal32", "Decimal64", "Decimal128" or "Decimal256", for use in error messages
     const PREFIX: &'static str;
 
-    /// Formats the decimal value with the provided precision and scale
-    fn format_decimal(value: Self::Native, precision: u8, scale: i8) -> String;
+    /// Formats `value` with `scale` fractional digits. The value is always
+    /// formatted in full: `precision` is ignored and retained for API
+    /// compatibility.
+    fn format_decimal(value: Self::Native, _precision: u8, scale: i8) -> String {
+        arrow_data::decimal::format_decimal(value, scale)
+    }
 
     /// Validates that `value` contains no more than `precision` decimal digits
     fn validate_decimal_precision(
@@ -1485,10 +1491,6 @@ impl DecimalType for Decimal32Type {
         DataType::Decimal32(DECIMAL32_MAX_PRECISION, DECIMAL32_DEFAULT_SCALE);
     const PREFIX: &'static str = "Decimal32";
 
-    fn format_decimal(value: Self::Native, precision: u8, scale: i8) -> String {
-        format_decimal_str(&value.to_string(), precision as usize, scale)
-    }
-
     fn validate_decimal_precision(num: i32, precision: u8, scale: i8) -> Result<(), ArrowError> {
         validate_decimal32_precision(num, precision, scale)
     }
@@ -1520,10 +1522,6 @@ impl DecimalType for Decimal64Type {
     const DEFAULT_TYPE: DataType =
         DataType::Decimal64(DECIMAL64_MAX_PRECISION, DECIMAL64_DEFAULT_SCALE);
     const PREFIX: &'static str = "Decimal64";
-
-    fn format_decimal(value: Self::Native, precision: u8, scale: i8) -> String {
-        format_decimal_str(&value.to_string(), precision as usize, scale)
-    }
 
     fn validate_decimal_precision(num: i64, precision: u8, scale: i8) -> Result<(), ArrowError> {
         validate_decimal64_precision(num, precision, scale)
@@ -1557,10 +1555,6 @@ impl DecimalType for Decimal128Type {
         DataType::Decimal128(DECIMAL128_MAX_PRECISION, DECIMAL_DEFAULT_SCALE);
     const PREFIX: &'static str = "Decimal128";
 
-    fn format_decimal(value: Self::Native, precision: u8, scale: i8) -> String {
-        format_decimal_str(&value.to_string(), precision as usize, scale)
-    }
-
     fn validate_decimal_precision(num: i128, precision: u8, scale: i8) -> Result<(), ArrowError> {
         validate_decimal_precision(num, precision, scale)
     }
@@ -1592,10 +1586,6 @@ impl DecimalType for Decimal256Type {
     const DEFAULT_TYPE: DataType =
         DataType::Decimal256(DECIMAL256_MAX_PRECISION, DECIMAL_DEFAULT_SCALE);
     const PREFIX: &'static str = "Decimal256";
-
-    fn format_decimal(value: Self::Native, precision: u8, scale: i8) -> String {
-        format_decimal_str(&value.to_string(), precision as usize, scale)
-    }
 
     fn validate_decimal_precision(num: i256, precision: u8, scale: i8) -> Result<(), ArrowError> {
         validate_decimal256_precision(num, precision, scale)
@@ -1696,23 +1686,26 @@ impl<O: OffsetSizeTrait> ByteArrayType for GenericStringType<O> {
     };
 
     fn validate(offsets: &OffsetBuffer<Self::Offset>, values: &Buffer) -> Result<(), ArrowError> {
-        // Verify that the slice as a whole is valid UTF-8
-        let validated = std::str::from_utf8(values).map_err(|e| {
+        let start = offsets.first().as_usize();
+        let end = offsets.last().as_usize();
+        if end > values.len() {
+            return Err(ArrowError::InvalidArgumentError(format!(
+                "Offset of {end} exceeds length of values {}",
+                values.len()
+            )));
+        }
+
+        // Verify that the bytes the offsets span are valid UTF-8
+        let validated = std::str::from_utf8(&values[start..end]).map_err(|e| {
             ArrowError::InvalidArgumentError(format!("Encountered non UTF-8 data: {e}"))
         })?;
 
-        // Verify each offset is at a valid character boundary in this UTF-8 array
+        // Verify each offset is at a valid character boundary
         for offset in offsets.iter() {
             let o = offset.as_usize();
-            if !validated.is_char_boundary(o) {
-                if o < validated.len() {
-                    return Err(ArrowError::InvalidArgumentError(format!(
-                        "Split UTF-8 codepoint at offset {o}"
-                    )));
-                }
+            if !validated.is_char_boundary(o - start) {
                 return Err(ArrowError::InvalidArgumentError(format!(
-                    "Offset of {o} exceeds length of values {}",
-                    validated.len()
+                    "Split UTF-8 codepoint at offset {o}"
                 )));
             }
         }
@@ -1743,7 +1736,7 @@ impl<O: OffsetSizeTrait> ByteArrayType for GenericBinaryType<O> {
 
     fn validate(offsets: &OffsetBuffer<Self::Offset>, values: &Buffer) -> Result<(), ArrowError> {
         // offsets are guaranteed to be monotonically increasing and non-empty
-        let max_offset = offsets.last().unwrap().as_usize();
+        let max_offset = offsets.last().as_usize();
         if values.len() < max_offset {
             return Err(ArrowError::InvalidArgumentError(format!(
                 "Maximum offset of {max_offset} is larger than values of length {}",

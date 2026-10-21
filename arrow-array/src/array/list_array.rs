@@ -204,7 +204,7 @@ impl<OffsetSize: OffsetSizeTrait> GenericListArray<OffsetSize> {
     ///
     /// * `offsets.len() - 1 != nulls.len()`
     /// * `offsets.last() > values.len()`
-    /// * `!field.is_nullable() && values.is_nullable()`
+    /// * `!field.is_nullable() && values.logical_null_count() != 0`
     /// * `field.data_type() != values.data_type()`
     pub fn try_new(
         field: FieldRef,
@@ -213,7 +213,7 @@ impl<OffsetSize: OffsetSizeTrait> GenericListArray<OffsetSize> {
         nulls: Option<NullBuffer>,
     ) -> Result<Self, ArrowError> {
         let len = offsets.len() - 1; // Offsets guaranteed to not be empty
-        let end_offset = offsets.last().unwrap().as_usize();
+        let end_offset = offsets.last().as_usize();
         // don't need to check other values of `offsets` because they are checked
         // during construction of `OffsetBuffer`
         if end_offset > values.len() {
@@ -232,7 +232,7 @@ impl<OffsetSize: OffsetSizeTrait> GenericListArray<OffsetSize> {
                 n.len(),
             )));
         }
-        if !field.is_nullable() && values.is_nullable() {
+        if !field.is_nullable() && values.logical_null_count() != 0 {
             return Err(ArrowError::InvalidArgumentError(format!(
                 "Non-nullable field of {}ListArray {:?} cannot contain nulls",
                 OffsetSize::PREFIX,
@@ -315,9 +315,8 @@ impl<OffsetSize: OffsetSizeTrait> GenericListArray<OffsetSize> {
         ArrayRef,
         Option<NullBuffer>,
     ) {
-        let f = match self.data_type {
-            DataType::List(f) | DataType::LargeList(f) => f,
-            _ => unreachable!(),
+        let (DataType::List(f) | DataType::LargeList(f)) = self.data_type else {
+            unreachable!()
         };
         (f, self.value_offsets, self.values, self.nulls)
     }
@@ -681,6 +680,15 @@ impl<OffsetSize: OffsetSizeTrait> super::ListLikeArray for GenericListArray<Offs
     }
 }
 
+impl<'a, OffsetSize: OffsetSizeTrait> IntoIterator for &'a GenericListArray<OffsetSize> {
+    type Item = Option<ArrayRef>;
+    type IntoIter = GenericListArrayIter<'a, OffsetSize>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        GenericListArrayIter::<'a, OffsetSize>::new(self)
+    }
+}
+
 impl<OffsetSize: OffsetSizeTrait> ArrayAccessor for &GenericListArray<OffsetSize> {
     type Item = ArrayRef;
 
@@ -698,8 +706,8 @@ impl<OffsetSize: OffsetSizeTrait> std::fmt::Debug for GenericListArray<OffsetSiz
         let prefix = OffsetSize::PREFIX;
 
         write!(f, "{prefix}ListArray\n[\n")?;
-        print_long_array(self, f, |array, index, f| {
-            std::fmt::Debug::fmt(&array.value(index), f)
+        print_long_array(self, f, &mut |index, f| {
+            std::fmt::Debug::fmt(&self.value(index), f)
         })?;
         write!(f, "]")
     }
@@ -1343,6 +1351,35 @@ mod tests {
             err.to_string(),
             "Invalid argument error: Max offset of 5 exceeds length of values 2"
         );
+    }
+
+    #[test]
+    fn test_try_new_non_nullable_field_dictionary_values() {
+        let keys = Int8Array::new(vec![0i8, 1].into(), Some(NullBuffer::new_valid(2)));
+        let values = StringArray::from(vec!["x", "y"]);
+        let dict = Int8DictionaryArray::try_new(keys, Arc::new(values)).unwrap();
+        let field = Arc::new(Field::new("element", dict.data_type().clone(), false));
+        ListArray::try_new(
+            field,
+            OffsetBuffer::new(vec![0, 2].into()),
+            Arc::new(dict),
+            None,
+        )
+        .unwrap();
+
+        let keys = Int8Array::from(vec![Some(0i8), None]);
+        let values = StringArray::from(vec!["x", "y"]);
+        let dict = Int8DictionaryArray::try_new(keys, Arc::new(values)).unwrap();
+        let field = Arc::new(Field::new("element", dict.data_type().clone(), false));
+        let err = ListArray::try_new(
+            field,
+            OffsetBuffer::new(vec![0, 2].into()),
+            Arc::new(dict),
+            None,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("cannot contain nulls"));
     }
 
     #[test]
